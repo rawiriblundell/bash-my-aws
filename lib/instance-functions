@@ -252,13 +252,13 @@ instance-ssh() {
     ssh_user="${ssh_user:-${instance_default_user:-${AWS_DEFAULT_USER:-root}}}"
     echo "Connecting to EC2 Instance $instance_id '$instance_name'" 2>&1
 
-    ssh                                    \
-      -t                                   \
-      -i "${BMA_SSH_DIR:-~/.ssh/}$keyname" \
-      -o LogLevel=error                    \
-      -o StrictHostKeyChecking=no          \
-      -o UserKnownHostsFile=/dev/null      \
-      -l "${ssh_user}"                     \
+    ssh                                      \
+      -t                                     \
+      -i "${BMA_SSH_DIR:-~/.ssh}/${keyname}" \
+      -o LogLevel=error                      \
+      -o StrictHostKeyChecking=no            \
+      -o UserKnownHostsFile=/dev/null        \
+      -l "${ssh_user}"                       \
       "${private_ip}"
   done
 }
