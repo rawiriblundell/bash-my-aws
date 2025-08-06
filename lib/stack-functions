@@ -1126,26 +1126,25 @@ _bma_stack_capabilities() {
   aws cloudformation describe-stacks --stack-name "$1" --query 'Stacks[].Capabilities' --output text
 }
 
-stack-drift() {
-  # List drifted resources in CloudFormation stacks
+stack-drift-detect() {
+  # Initiate drift detection for CloudFormation stacks (non-blocking)
   #
-  #     $ stack-drift my-stack
-  #     my-stack  MyBucket         AWS::S3::Bucket        MODIFIED  2025-08-06T10:30:00Z  BucketEncryption
-  #     my-stack  MyTable          AWS::DynamoDB::Table   DELETED   2025-08-06T10:30:00Z  RESOURCE_DELETED
+  #     $ stack-drift-detect my-stack
+  #     my-stack  d290f1ee-6c54-4b01-90e6-d701748f0851  DETECTION_IN_PROGRESS
   #
-  #     $ stacks | stack-drift
-  #     web-stack   WebBucket       AWS::S3::Bucket        MODIFIED  2025-08-06T09:15:00Z  Tags
-  #     app-stack   AppFunction     AWS::Lambda::Function  MODIFIED  2025-08-06T09:20:00Z  Environment.Variables
+  #     $ stacks | stack-drift-detect
+  #     web-stack   a123b456-7c89-0d12-34e5-678901234567  DETECTION_IN_PROGRESS
+  #     app-stack   b234c567-8d90-1e23-45f6-789012345678  DETECTION_IN_PROGRESS
+  #     data-stack  c345d678-9e01-2f34-56a7-890123456789  DETECTION_IN_PROGRESS
   #
-  # Note: Drift detection must be initiated and may take time for large stacks.
-  # The function will wait for detection to complete (up to 5 minutes per stack).
+  # Note: This function initiates drift detection and returns immediately.
+  # Use stack-drift-status to check progress or stack-drift-resources to see results.
 
   local stack_names=$(skim-stdin "$@")
   [[ -z "$stack_names" ]] && __bma_usage "stack-name [stack-name]" && return 1
 
   local stack_name
   for stack_name in $stack_names; do
-    # Initiate drift detection
     local drift_detection_id=$(
       aws cloudformation detect-stack-drift \
         --stack-name "$stack_name" \
@@ -1154,52 +1153,106 @@ stack-drift() {
     )
     
     if [[ -z "$drift_detection_id" ]]; then
-      __bma_error "Failed to initiate drift detection for stack: $stack_name" >&2
-      continue
+      printf "%s\t%s\t%s\n" "$stack_name" "ERROR" "FAILED_TO_INITIATE"
+    else
+      printf "%s\t%s\t%s\n" "$stack_name" "$drift_detection_id" "DETECTION_IN_PROGRESS"
     fi
+  done | columnise
+}
+
+stack-drift-status() {
+  # Check the status of drift detection for CloudFormation stacks
+  #
+  #     $ stack-drift-status my-stack
+  #     my-stack  DETECTION_COMPLETE  DRIFTED  2025-08-06T10:30:00Z  120
+  #
+  #     $ stacks | stack-drift-status
+  #     web-stack   DETECTION_COMPLETE     DRIFTED     2025-08-06T09:15:00Z  45
+  #     app-stack   DETECTION_IN_PROGRESS  UNKNOWN     2025-08-06T09:20:00Z  15
+  #     data-stack  DETECTION_COMPLETE     IN_SYNC     2025-08-06T09:18:00Z  30
+
+  local stack_names=$(skim-stdin "$@")
+  [[ -z "$stack_names" ]] && __bma_usage "stack-name [stack-name]" && return 1
+
+  local stack_name
+  for stack_name in $stack_names; do
+    # Get stack drift status
+    aws cloudformation describe-stacks \
+      --stack-name "$stack_name" \
+      --output text \
+      --query '
+        Stacks[].[
+          StackName,
+          DriftInformation.StackDriftStatus || `NOT_CHECKED`,
+          DriftInformation.LastCheckTimestamp || `NEVER`
+        ]' 2>/dev/null || printf "%s\t%s\t%s\n" "$stack_name" "ERROR" "STACK_NOT_FOUND"
+  done | columnise
+}
+
+stack-drift-resources() {
+  # List drifted resources in CloudFormation stacks
+  #
+  #     $ stack-drift-resources my-stack
+  #     my-stack  MyBucket         AWS::S3::Bucket        MODIFIED  2025-08-06T10:30:00Z  BucketEncryption
+  #     my-stack  MyTable          AWS::DynamoDB::Table   DELETED   2025-08-06T10:30:00Z  RESOURCE_DELETED
+  #
+  #     $ stacks | stack-drift-resources
+  #     web-stack   WebBucket       AWS::S3::Bucket        MODIFIED  2025-08-06T09:15:00Z  Tags
+  #     app-stack   NO_DRIFT_DATA   Run_stack-drift-detect_first
+  #     data-stack  IN_SYNC         No_drifted_resources_found
+  #
+  # Note: This shows results from the most recent drift detection.
+  # If no drift detection has been run, it will indicate this in the output.
+
+  local stack_names=$(skim-stdin "$@")
+  [[ -z "$stack_names" ]] && __bma_usage "stack-name [stack-name]" && return 1
+
+  local stack_name
+  for stack_name in $stack_names; do
+    # First check if drift detection has been performed
+    local drift_status=$(
+      aws cloudformation describe-stacks \
+        --stack-name "$stack_name" \
+        --output text \
+        --query 'Stacks[0].DriftInformation.StackDriftStatus' 2>/dev/null
+    )
     
-    # Wait for drift detection to complete (max 5 minutes)
-    local max_wait=300  # 5 minutes
-    local wait_interval=5
-    local elapsed=0
-    local detection_status="DETECTION_IN_PROGRESS"
-    
-    while [[ "$detection_status" == "DETECTION_IN_PROGRESS" ]] && [[ $elapsed -lt $max_wait ]]; do
-      sleep $wait_interval
-      elapsed=$((elapsed + wait_interval))
-      
-      detection_status=$(
-        aws cloudformation describe-stack-drift-detection-status \
-          --stack-drift-detection-id "$drift_detection_id" \
-          --output text \
-          --query 'DetectionStatus' 2>/dev/null
-      )
-      
-      # Show progress
-      if [[ $((elapsed % 20)) -eq 0 ]]; then
-        echo "Drift detection in progress for $stack_name... (${elapsed}s elapsed)" >&2
-      fi
-    done
-    
-    if [[ "$detection_status" != "DETECTION_COMPLETE" ]]; then
-      __bma_error "Drift detection failed or timed out for stack: $stack_name (status: $detection_status)" >&2
+    if [[ -z "$drift_status" ]] || [[ "$drift_status" == "None" ]]; then
+      printf "%s\t%s\t%s\n" "$stack_name" "ERROR" "STACK_NOT_FOUND"
+      continue
+    elif [[ "$drift_status" == "NOT_CHECKED" ]]; then
+      printf "%s\t%s\t%s\n" "$stack_name" "NO_DRIFT_DATA" "Run_stack-drift-detect_first"
+      continue
+    elif [[ "$drift_status" == "IN_SYNC" ]]; then
+      printf "%s\t%s\t%s\n" "$stack_name" "IN_SYNC" "No_drifted_resources_found"
       continue
     fi
     
     # Get drifted resources
-    aws cloudformation describe-stack-resource-drifts \
-      --stack-name "$stack_name" \
-      --stack-resource-drift-status-filters MODIFIED DELETED \
-      --output text \
-      --query '
-        StackResourceDrifts[].[
-          `'"$stack_name"'`,
-          LogicalResourceId,
-          ResourceType,
-          StackResourceDriftStatus,
-          Timestamp,
-          join(`,`, PropertyDifferences[].PropertyPath) || `RESOURCE_DELETED`
-        ]' 2>/dev/null
+    local has_output=false
+    while IFS=$'\t' read -r logical_id resource_type drift_status timestamp properties; do
+      printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
+        "$stack_name" "$logical_id" "$resource_type" "$drift_status" "$timestamp" "$properties"
+      has_output=true
+    done < <(
+      aws cloudformation describe-stack-resource-drifts \
+        --stack-name "$stack_name" \
+        --stack-resource-drift-status-filters MODIFIED DELETED \
+        --output text \
+        --query '
+          StackResourceDrifts[].[
+            LogicalResourceId,
+            ResourceType,
+            StackResourceDriftStatus,
+            Timestamp,
+            join(`,`, PropertyDifferences[].PropertyPath) || `RESOURCE_DELETED`
+          ]' 2>/dev/null
+    )
+    
+    # If no drifted resources but status shows drift, indicate this
+    if [[ "$has_output" == "false" ]] && [[ "$drift_status" == "DRIFTED" ]]; then
+      printf "%s\t%s\t%s\n" "$stack_name" "NO_RESOURCES" "Drift_detected_but_no_resources_listed"
+    fi
   done | columnise
 }
 
