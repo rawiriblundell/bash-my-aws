@@ -1,6 +1,17 @@
-.PHONY: build test run_tests check clean install-hooks
+.PHONY: build build-verbose test run_tests check clean install-hooks
 
 build:
+	@./scripts/build > /dev/null 2>&1
+	@echo "Build complete."
+	@echo "  Functions: $$(wc -l < functions | tr -d ' ')"
+	@echo "  Aliases:   $$(grep -c '^alias ' aliases)"
+	@if ! git diff --quiet aliases functions bash_completion.sh 2>/dev/null; then \
+		echo ""; \
+		echo "Changed files:"; \
+		git diff --stat aliases functions bash_completion.sh; \
+	fi
+
+build-verbose:
 	./scripts/build
 
 test: run_tests
