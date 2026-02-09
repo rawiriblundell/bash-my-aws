@@ -183,7 +183,7 @@ r53-zone-records(){
   #     bash-my-aws.org.  300 A 185.199.108.153
   #     bash-my-aws.org.  300 A 185.199.109.153
 
-  local record_type hosted_zone_id
+  local record_type hosted_zone_id jq_script
 
   case "${1}" in
     (--type)
@@ -195,8 +195,18 @@ r53-zone-records(){
   hosted_zone_id="$(skim-stdin "${@}")"
   [[ -z "${hosted_zone_id}" ]] && __bma_usage "r53-zone-records" && return 1
 
+  read -r -d '' jq_script <<'EOF'
+    .ResourceRecordSets[] |
+    select(.Type == $record_type or $record_type == "") |
+    if .AliasTarget then
+      "\(.Name)\t86400\tALIAS\t\(.AliasTarget.DNSName)\n"
+    else
+      "\(.Name)\t\(.TTL)\t\(.Type)\t\(.ResourceRecords[].Value)\n"
+    end
+EOF
+
   aws route53 list-resource-record-sets --hosted-zone-id "${hosted_zone_id}" --output json |
-    jq -jr --arg record_type "${record_type}" '.ResourceRecordSets[] | select(.Type == $record_type or $record_type == "") | "\(.Name)\t\(.TTL)\t\(.Type)\t\(.ResourceRecords[]?.Value)\n"' |
+    jq -jr --arg record_type "${record_type}" "${jq_script}" |
     columnise
 }
 
